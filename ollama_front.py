@@ -493,6 +493,39 @@ def _build_app() -> FastAPI:
         gpus = await read_local_gpus()
         return {"host": socket.gethostname(), "gpus": gpus}
 
+    @app.post("/gpu/ingest")
+    async def gpu_ingest(req: Request):
+        """Push-mode ingestion: a remote agent POSTs {host_name, gpus, token}.
+
+        Used by out-of-LAN fleet members that the hub cannot poll. Sample is
+        fed into the same FleetMonitor state as polled hosts, so routing,
+        history and the dashboard need no changes. Token auth: the registry
+        entry's `token` field (hft-...) must match.
+        """
+        gpu = state.get("gpu")
+        try:
+            body = await req.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+        name = (body.get("host_name") or "").strip()
+        token = (body.get("token") or "").strip()
+        gpus = body.get("gpus")
+        if not name or not isinstance(gpus, list):
+            return JSONResponse({"ok": False, "error": "host_name and gpus[] required"}, status_code=400)
+        if not gpu:
+            return JSONResponse({"ok": False, "error": "routing disabled on hub"}, status_code=503)
+        reg = next((h for h in gpu.hosts.load() if h.get("name") == name), None)
+        if reg is None:
+            return JSONResponse({"ok": False, "error": "unknown host"}, status_code=404)
+        expected = (reg.get("token") or "").strip()
+        if not expected or token != expected:
+            return JSONResponse({"ok": False, "error": "invalid token"}, status_code=401)
+        ok = gpu.ingest_sample(name, gpus)
+        if ok:
+            events.log("gpu_ingest", detail=f"{name} pushed {len(gpus)} gpu(s)")
+        return JSONResponse({"ok": ok, "next_s": GPU_POLL_INTERVAL if ok else None},
+                            status_code=(200 if ok else 400))
+
     @app.get("/gpu/fleet")
     async def gpu_fleet():
         """Agent/human-facing view of every host in fleet_hosts.json and current routing."""

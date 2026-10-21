@@ -161,12 +161,19 @@ def _url_host(url: str) -> str:
 
 
 class HostsFile:
-    """Hot-reloading reader for the fleet host registry."""
+    """Hot-reloading reader for the fleet host registry.
+
+    Each entry: {"name": ..., "url": ..., "mode": "pull"|"push"}.
+    `pull` (LAN default): the hub polls {url}/gpu/status as always.
+    `push` (out-of-LAN): the remote agent POSTs samples to our /gpu/ingest;
+      `url` is optional for push hosts (used only for display/deep-links).
+    """
 
     def __init__(self, path: str):
         self.path = path
         self._mtime: float = -1.0
         self._hosts: list[dict] = []
+        self._pollable: list[dict] = []
 
     def load(self) -> list[dict]:
         try:
@@ -178,12 +185,18 @@ class HostsFile:
         try:
             with open(self.path, "r") as f:
                 data = json.load(f)
-            hosts = [h for h in data if h.get("name") and h.get("url")]
+            hosts = [h for h in data if h.get("name") and (h.get("url") or h.get("mode") == "push")]
             self._hosts = hosts
+            self._pollable = [h for h in hosts if h.get("url")]
             self._mtime = mtime
         except Exception:
             pass  # keep last-known-good list rather than go blind on a bad edit
         return self._hosts
+
+    def pull_hosts(self) -> list[dict]:
+        """Only hosts this machine should actively poll (mode=pull, default)."""
+        self.load()
+        return self._pollable
 
 
 class FleetMonitor:
@@ -280,7 +293,7 @@ class FleetMonitor:
                 await asyncio.sleep(self.poll_interval)
 
     async def _poll_once(self) -> None:
-        hosts = self.hosts.load()
+        hosts = self.hosts.pull_hosts()  # push-mode hosts arrive via ingest_sample() instead
         for host in hosts:
             name, url = host["name"], host["url"].rstrip("/")
             is_self = self._is_self(host)
@@ -306,6 +319,23 @@ class FleetMonitor:
             if stale_name not in known:
                 del self.state[stale_name]
         self._record_history()
+
+    def ingest_sample(self, name: str, gpus: list[dict]) -> bool:
+        """Accept a pushed sample from a push-mode remote agent (out-of-LAN host).
+
+        Mirrors what _poll_once does for pull hosts: update state so routing,
+        history and the dashboard see it exactly like a polled host. Rejects
+        names not present in fleet_hosts.json with mode=push.
+        """
+        entry = next((h for h in self.hosts.load()
+                      if h.get("name") == name and h.get("mode") == "push"), None)
+        if entry is None:
+            return False
+        self.state[name] = {"url": entry.get("url"), "gpus": gpus if isinstance(gpus, list) else [],
+                            "ts": time.time(), "reachable": True, "is_self": False,
+                            "mode": "push"}
+        self._record_history()
+        return True
 
     def _fresh(self, entry: dict) -> bool:
         return entry.get("reachable", False) and (time.time() - entry.get("ts", 0.0)) <= self.stale_after
