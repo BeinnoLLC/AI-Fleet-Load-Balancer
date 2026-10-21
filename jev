@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# jev - one-shot "System One" questions answered by YOUR local Ollama models.
+#
+# Usage:
+#   jev ask "<text>"             # billing / outage / tone opinion
+#   jev ask "<text>" --urgency   # also adds an urgency score
+#   jev custom "<text>" '<raw questions JSON>'   # full control
+#   jev raw '<full request JSON>'
+#   jev chat                     # interactive: type yes/no questions about a context
+#   jev models                   # what this server advertises
+#   jev health
+#
+# Env overrides: JEV_URL (default http://127.0.0.1:8080), JEV_MODEL (default openjev-latest)
+set -euo pipefail
+JEV_URL="${JEV_URL:-http://127.0.0.1:8080}"
+JEV_MODEL="${JEV_MODEL:-openjev-latest}"
+
+die() { echo "jev: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+need jq; need curl
+
+usage() { sed -n "2,13p" "$0" | sed "s/^# \{0,1\}//"; exit "${1:-0}"; }
+[[ $# -ge 1 ]] || usage 1
+cmd="$1"; shift
+
+case "$cmd" in
+  models)  curl -fsS "$JEV_URL/v1/models" | jq -r ".models[] | .name + \"  -  \" + .description" ;;
+  health)  curl -fsS "$JEV_URL/health" && echo ;;
+  raw)     curl -fsS "$JEV_URL/v1/systemone" -H "Content-Type: application/json" -d "$1" | jq . ;;
+  custom)
+    [[ $# -ge 2 ]] || { echo "usage: jev custom \"<text>\" '<questions-json>'" >&2; exit 1; }
+    jq -n --arg st "$1" --arg m "$JEV_MODEL" --argjson q "$2" \
+      "{state: \$st, model: \$m, questions: \$q}" |
+      curl -fsS "$JEV_URL/v1/systemone" -H "Content-Type: application/json" -d @- | jq .
+    ;;
+  ask)
+    args=(); mode=rec
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --urgency) mode=urgency; shift ;;
+        --no-recommended) mode=none; shift ;;
+        --) shift; break ;;
+        -*) echo "jev: unknown flag $1" >&2; exit 1 ;;
+        *)  args+=("$1"); shift ;;
+      esac
+    done
+    [[ ${#args[@]} -eq 1 ]] || { echo "usage: jev ask \"<text>\" [--urgency|--no-recommended]" >&2; exit 1; }
+    case "$mode" in
+      urgency) q="{\"billing\": {\"type\": \"noul\", \"instructions\": \"Does this concern billing, payment, or an account charge?\"}, \"outage\": {\"type\": \"noul\", \"instructions\": \"Does this concern a service outage or something broken/unavailable?\"}, \"tone\": {\"type\": \"choice\", \"instructions\": \"What is the emotional tone?\", \"criteria\": {\"calm\": \"neutral, no emotion\", \"frustrated\": \"annoyed but patient\", \"angry\": \"hostile, demanding\", \"threatening\": \"explicit threat or cancellation intent\"}}, \"urgency\": {\"type\": \"score\", \"instructions\": \"How urgent?\", \"criteria\": [\"no urgency\", \"low\", \"moderate\", \"high\", \"critical, act today\"]}}" ;;
+      rec)     q="{\"billing\": {\"type\": \"noul\", \"instructions\": \"Does this concern billing, payment, or an account charge?\"}, \"outage\": {\"type\": \"noul\", \"instructions\": \"Does this concern a service outage or something broken/unavailable?\"}, \"tone\": {\"type\": \"choice\", \"instructions\": \"What is the emotional tone?\", \"criteria\": {\"calm\": \"neutral, no emotion\", \"frustrated\": \"annoyed but patient\", \"angry\": \"hostile, demanding\", \"threatening\": \"explicit threat or cancellation intent\"}}}" ;;
+      none)    q="{\"tone\": {\"type\": \"choice\", \"instructions\": \"What is the emotional tone?\", \"criteria\": {\"calm\": \"neutral, no emotion\", \"frustrated\": \"annoyed but patient\", \"angry\": \"hostile, demanding\", \"threatening\": \"explicit threat or cancellation intent\"}}}" ;;
+    esac
+    "$0" custom "${args[0]}" "$q" | jq -r "
+      .answers | to_entries[] |
+      if .value.type == \"noul\" then
+        \"\(.key): \(if .value.noul > 0.8 then \"yes\" elif .value.noul < 0.2 then \"no\" else \"maybe\" end)  (p=\(.value.noul))\"
+      elif .value.type == \"choice\" then
+        \"\(.key): \(.value.choice)  (conf \(.value.confidence))\"
+      elif .value.type == \"score\" then
+        \"\(.key): \(.value.score) / \((.value.legend | length) - 1)  (conf \(.value.confidence))\"
+      else .key end"
+    ;;
+  chat)
+    hist=$(mktemp); trap 'rm -f "$hist"' EXIT
+    echo "jev chat — first lines build your context (paste emails, logs...)."
+    echo "Then ask yes/no questions — each line is evaluated against everything so far."
+    echo "/new clears context, exit quits. Example question: is the user threatening to cancel?"
+    while IFS= read -r -p "jev> " line; do
+      case "$line" in
+        exit|quit|q) echo bye; break ;;
+        /new|/clear) : > "$hist"; echo "context cleared"; continue ;;
+        "") continue ;;
+      esac
+      state="$line"
+      if [[ -s "$hist" ]]; then
+        state="$(printf '%s\n\n---\n%s' "$(cat "$hist")" "$line")"
+      fi
+      req=$(jq -n --arg st "$state" --arg m "$JEV_MODEL" --arg q "$line" \
+        '{state: $st, model: $m, questions: {answer: {type: "noul", instructions: ("Decide whether the question is true of the content. Question: " + $q), criteria: {true: "true of this content", false: "false or not determinable"}}}}')
+      curl -fsS "$JEV_URL/v1/systemone" -H "Content-Type: application/json" -d "$req" \
+        | jq -r '.answers.answer.noul as $p | ($p) as $p | "p(yes)=\($p)  →  " + (if $p > 0.8 then "yes" elif $p < 0.2 then "no" else "maybe" end)'
+      echo "$line" >> "$hist"
+    done
+    ;;
+  *) usage 1 ;;
+esac

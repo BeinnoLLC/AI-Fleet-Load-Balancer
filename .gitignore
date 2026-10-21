@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+*.db
+*.db-shm
+*.db-wal
+.gpu_history.json
+server.log
+*.bak
+strata_upstream.txt.local
+.env

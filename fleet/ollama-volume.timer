@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically ensure New Volume is mounted (repairs Windows lock)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

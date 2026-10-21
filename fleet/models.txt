@@ -1,0 +1,42 @@
+# Canonical model set for the Ollama fleet. Both twins converge to this list.
+# One model per line. '#' comments and blank lines ignored.
+# The sync pulls any missing model on each host (pull failures are logged, not fatal).
+# Edit here and re-run the sync to fan changes out to every host.
+# Tip: `ollama list` shows what a host already has; keep the shared core small.
+
+# --- general chat / reasoning ---
+qwen2.5:7b
+qwen2.5:3b
+qwen3:14b
+qwen3:30b-a3b
+gemma3:4b
+gemma3:12b
+llama3.2:3b
+llama3.1:latest
+gpt-oss:20b
+deepseek-r1:14b
+devstral-small-2:latest
+ministral-3:latest
+nemotron-3.5-lightning:latest
+ornith:latest
+ornith-1.5:9b
+
+# openjev:latest is the SystemOne facade alias (0 B sidecar entry): hosts
+# register it at boot; the fleet never pulls it. clef/clef-flash stay in the
+# decision section below.
+#
+# --- coding ---
+qwen2.5-coder:7b
+qwen2.5-coder:3b
+qwen2.5-coder:1.5b
+qwen2.5-coder:1.5b-base
+codegemma:2b
+qwen3-coder:30b
+
+# --- tool use / embeddings ---
+llama3-groq-tool-use:latest
+nomic-embed-text:latest
+
+# --- decision / SystemOne (Jev-style; /v1/systemone) ---
+clef:latest
+clef-flash:latest

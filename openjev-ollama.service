@@ -1,0 +1,17 @@
+# Systemd unit. Install:
+#   cp openjev-ollama.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now openjev-ollama
+# Then: journalctl --user -u openjev-ollama -f
+[Unit]
+Description=OpenJev-on-Ollama (System One facade backed by local Ollama)
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/openjev-ollama
+EnvironmentFile=-%h/workspace/openjev-ollama/.env
+ExecStart=%h/workspace/openjev-ollama/.venv/bin/python %h/workspace/openjev-ollama/ollama_jev.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

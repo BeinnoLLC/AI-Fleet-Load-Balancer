@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Background -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0f3460;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d4ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0099ff;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <rect width="256" height="256" fill="url(#bgGrad)" rx="32"/>
+  
+  <!-- Central router node (large circle) -->
+  <circle cx="128" cy="128" r="35" fill="url(#accentGrad)" opacity="0.2" stroke="#00d4ff" stroke-width="2"/>
+  <circle cx="128" cy="128" r="20" fill="url(#accentGrad)" stroke="#00d4ff" stroke-width="2"/>
+  <circle cx="128" cy="128" r="10" fill="#1a1a2e"/>
+  
+  <!-- Connection lines (circuit style) -->
+  <g stroke="#00d4ff" stroke-width="2" stroke-linecap="round" opacity="0.8">
+    <!-- Top left -->
+    <line x1="128" y1="128" x2="80" y2="60"/>
+    <!-- Top right -->
+    <line x1="128" y1="128" x2="176" y2="60"/>
+    <!-- Bottom left -->
+    <line x1="128" y1="128" x2="60" y2="180"/>
+    <!-- Bottom right -->
+    <line x1="128" y1="128" x2="196" y2="196"/>
+  </g>
+  
+  <!-- Machine/GPU nodes (smaller circles at endpoints) -->
+  <!-- Top left: .11 (4090) -->
+  <circle cx="80" cy="60" r="16" fill="url(#accentGrad)" stroke="#00d4ff" stroke-width="1.5"/>
+  <circle cx="80" cy="60" r="8" fill="#1a1a2e"/>
+  <text x="80" y="64" text-anchor="middle" font-family="monospace" font-size="10" fill="#00d4ff" font-weight="bold">.11</text>
+  
+  <!-- Top right: .12 (3090 Ti) -->
+  <circle cx="176" cy="60" r="16" fill="url(#accentGrad)" stroke="#00d4ff" stroke-width="1.5"/>
+  <circle cx="176" cy="60" r="8" fill="#1a1a2e"/>
+  <text x="176" y="64" text-anchor="middle" font-family="monospace" font-size="10" fill="#00d4ff" font-weight="bold">.12</text>
+  
+  <!-- Bottom left node -->
+  <circle cx="60" cy="180" r="14" fill="#0099ff" opacity="0.7" stroke="#00d4ff" stroke-width="1.5"/>
+  <circle cx="60" cy="180" r="7" fill="#1a1a2e"/>
+  
+  <!-- Bottom right node -->
+  <circle cx="196" cy="196" r="14" fill="#0099ff" opacity="0.7" stroke="#00d4ff" stroke-width="1.5"/>
+  <circle cx="196" cy="196" r="7" fill="#1a1a2e"/>
+  
+  <!-- Animated glow effect (via CSS in HTML) -->
+  <circle cx="128" cy="128" r="20" fill="none" stroke="#00d4ff" stroke-width="1" opacity="0.5"/>
+  
+  <!-- GPU symbol (small detail in corner) -->
+  <g transform="translate(220, 220)" opacity="0.6">
+    <rect x="0" y="0" width="28" height="20" fill="none" stroke="#00d4ff" stroke-width="1.5" rx="2"/>
+    <rect x="3" y="3" width="22" height="14" fill="none" stroke="#00d4ff" stroke-width="1"/>
+    <circle cx="7" cy="10" r="2" fill="#00d4ff"/>
+    <circle cx="14" cy="10" r="2" fill="#00d4ff"/>
+    <circle cx="21" cy="10" r="2" fill="#00d4ff"/>
+  </g>
+</svg>

@@ -1,0 +1,8 @@
+[Unit]
+Description=Mount and repair the New Volume (Windows NTFS) partition
+After=local-fs.target
+ConditionPathExists=/dev/disk/by-uuid/1050D7C550D7AFA8
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/volume-watch.sh
