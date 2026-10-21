@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import time
 
 import asyncio
@@ -748,8 +749,55 @@ def _build_app() -> FastAPI:
 
 app = _build_app()
 
+def _ensure_self_signed(cert: str, key: str, days: int = 3650) -> bool:
+    """Generate a self-signed cert/key pair if missing. Returns True on success."""
+    if os.path.exists(cert) and os.path.exists(key):
+        return True
+    try:
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-days", str(days), "-subj", "/CN=ollama-fleet-hub",
+             "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+             "-keyout", key, "-out", cert],
+            check=True, capture_output=True)
+        os.chmod(key, 0o600)
+        return True
+    except Exception as e:
+        print(f"tls: self-signed cert generation failed: {e}", flush=True)
+        return False
+
+
 if __name__ == "__main__":
+    import asyncio
     import uvicorn
 
-    uvicorn.run(app, host=os.environ.get("JEV_HOST", "0.0.0.0"),
-                port=int(os.environ.get("JEV_PORT", "11434")), log_level="warning")
+    host = os.environ.get("JEV_HOST", "0.0.0.0")
+    servers = [uvicorn.Config(app, host=host,
+                              port=int(os.environ.get("JEV_PORT", "11434")),
+                              log_level="warning")]
+
+    # Optional second HTTPS listener for push agents (fleet-agent.py).
+    # Enable with JEV_TLS_PORT (e.g. 11443). Cert/key default to a self-signed
+    # pair auto-generated next to this file; agents use FLEET_TLS_INSECURE=1
+    # (or FLEET_CA_FILE=<hub cert>) when pushing over https.
+    tls_port = os.environ.get("JEV_TLS_PORT")
+    if tls_port:
+        tls_cert = os.environ.get("JEV_TLS_CERT")
+        tls_key = os.environ.get("JEV_TLS_KEY")
+        if not (tls_cert and tls_key):
+            tls_cert = tls_cert or os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub-cert.pem")
+            tls_key = tls_key or os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub-key.pem")
+            if _ensure_self_signed(tls_cert, tls_key):
+                os.chmod(tls_cert, 0o644)
+        if os.path.exists(tls_cert) and os.path.exists(tls_key):
+            servers.append(uvicorn.Config(app, host=host, port=int(tls_port),
+                                          log_level="warning",
+                                          ssl_certfile=tls_cert, ssl_keyfile=tls_key))
+        else:
+            print("tls: JEV_TLS_PORT set but no usable cert/key — no HTTPS listener", flush=True)
+
+    async def _serve_all(cfgs):
+        insts = [uvicorn.Server(c) for c in cfgs]
+        await asyncio.gather(*(i.serve() for i in insts))
+
+    asyncio.run(_serve_all(servers))

@@ -9,3 +9,5 @@ server.log
 *.bak
 strata_upstream.txt.local
 .env
+hub-*.pem
+hub-key.pem

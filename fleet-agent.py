@@ -11,6 +11,8 @@ script, KEY=VALUE lines):
   FLEET_HOST_NAME this machine's registry name (must exist in hub fleet_hosts.json, mode=push)
   FLEET_TOKEN     the hft-… token issued at enrollment
   PUSH_INTERVAL   seconds between pushes (default 5)
+  FLEET_CA_FILE   path to the hub's cert (PEM) for https pinning — preferred
+  FLEET_TLS_INSECURE  1 to skip cert verification (self-signed hubs without CA)
 
 Stdlib only (urllib) — no pip installs needed on fleet members.
 Fails soft: any error just logs to stderr and retries next interval.
@@ -18,6 +20,7 @@ Fails soft: any error just logs to stderr and retries next interval.
 
 import json
 import os
+import ssl
 import sys
 import time
 import subprocess
@@ -90,7 +93,16 @@ def push(cfg: dict, gpus: list) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    ctx = None
+    if url.startswith("https://"):
+        ca = cfg.get("FLEET_CA_FILE", "")
+        if ca and os.path.exists(ca):
+            ctx = ssl.create_default_context(cafile=ca)
+        elif cfg.get("FLEET_TLS_INSECURE") == "1":
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
         return json.loads(resp.read().decode() or "{}")
 
 

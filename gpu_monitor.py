@@ -349,6 +349,7 @@ class FleetMonitor:
             out.append({
                 "name": name,
                 "url": entry.get("url"),
+                "mode": entry.get("mode", "pull"),
                 "is_self": entry.get("is_self", False),
                 "online": fresh,
                 "last_seen_s_ago": round(time.time() - entry["ts"], 1) if entry.get("ts") else None,
@@ -474,8 +475,44 @@ footer{position:sticky;bottom:0;z-index:50;border-top:1px solid var(--line);padd
 footer a{color:var(--blue);text-decoration:none;transition:color .2s}
 footer a:hover{color:var(--fg)}
 #visgraph{filter:drop-shadow(0 2px 8px rgba(0,0,0,0.5));border-radius:10px}
+/* ---- toasts ---- */
+#toasts{position:fixed;top:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:.6rem;max-width:420px}
+.toast{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:10px;padding:.7rem .9rem;box-shadow:0 6px 24px rgba(0,0,0,.45);opacity:0;transform:translateX(24px);transition:opacity .25s,transform .25s;font-size:.85rem}
+.toast.show{opacity:1;transform:translateX(0)}
+.toast.done{border-left-color:var(--ok,#22c55e)}
+.toast.err{border-left-color:#ef4444}
+.toast .t-title{display:flex;align-items:center;gap:.5rem;font-weight:600;color:var(--fg)}
+.toast .t-sub{color:var(--mut);margin-top:.25rem;font-size:.8rem}
 </style></head>
 <body>
+<div id="toasts"></div>
+<script>
+// ---- toast + sound system ----
+let audioCtx=null,lastEventId=0,inflightT={};
+function ensureAudio(){ if(!audioCtx){ try{audioCtx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){} } if(audioCtx&&audioCtx.state==='suspended') audioCtx.resume(); return audioCtx; }
+function beep(kind){
+  const ac=ensureAudio(); if(!ac) return;
+  const seq = kind==='done' ? [660,880] : kind==='err' ? [330,220] : [520,780];
+  seq.forEach((f,i)=>{
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type= kind==='err' ? 'sawtooth':'sine'; o.frequency.value=f;
+    g.gain.setValueAtTime(0.0001,ac.currentTime+i*0.14);
+    g.gain.exponentialRampToValueAtTime(0.18,ac.currentTime+i*0.14+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+i*0.14+0.13);
+    o.connect(g); g.connect(ac.destination);
+    o.start(ac.currentTime+i*0.14); o.stop(ac.currentTime+i*0.14+0.14);
+  });
+}
+function toast(kind,title,sub,ttl){
+  const wrap=document.getElementById('toasts'); if(!wrap) return;
+  const el=document.createElement('div'); el.className='toast'+(kind==='done'?' done':kind==='err'?' err':'');
+  el.innerHTML=`<div class="t-title">${kind==='done'?'✅':kind==='err'?'⛔':'📨'} ${title}</div>${sub?`<div class="t-sub">${sub}</div>`:''}`;
+  wrap.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{el.classList.remove('show'); setTimeout(()=>el.remove(),300);},ttl||6000);
+  while(wrap.children.length>6) wrap.firstChild.remove();
+}
+</script>
 <h1>⚙️ Ollama Fleet — GPU Command Center</h1>
 <div class="sub">Live · refreshes every 3s · smart routing by GPU power, free VRAM, utilization & thermals</div>
 <div style="display:flex;justify-content:space-between;align-items:center;max-width:1200px;margin:0 auto 1.1rem">
@@ -632,7 +669,8 @@ function tick(){
         const tr=document.createElement('tr');
         const utilCls=g.utilization_pct>90?'c-hot':(g.utilization_pct>60?'c-warn':'c-ok');
         const tCls=g.temperature_c>=85?'c-hot':(g.temperature_c>=75?'c-warn':'c-ok');
-        tr.innerHTML=`<td>${i===0?h.name+(h.is_self?' <span style="color:#58a6ff">·</span>':''):''}</td>
+        const tBad = h.mode==='push' ? ' <span class="hbadge" style="background:rgba(163,113,247,.18);color:#a371f7" title="push-mode: agent POSTs samples to hub">📡 PUSH</span>' : (h.is_self?' <span style="color:#58a6ff">·</span>':'');
+        tr.innerHTML=`<td>${i===0?h.name+tBad:''}</td>
           <td>${g.name}</td>
           <td><span class="chip ${utilCls}">${g.utilization_pct}%</span><div class="utilbar"><i style="width:${g.utilization_pct}%"></i></div></td>
           <td>${(g.memory_used_mb/1024).toFixed(1)} / ${(g.memory_total_mb/1024).toFixed(1)} GB</td>
@@ -652,6 +690,24 @@ function drawEvents(){
       (d.stats.avg_duration_ms?`<span class="score">avg request: <b style="color:var(--fg)">${(d.stats.avg_duration_ms/1000).toFixed(1)}s</b></span>`:'');
     const tb=document.querySelector('#ev tbody');
     tb.innerHTML=(d.events||[]).map(e=>{
+      // toast watcher: fire once per event id
+      const eid=e.id!=null?e.id:(e.ts_iso+e.kind);
+      if(lastEventId && eid>lastEventId){
+        const upRaw=String(e.chosen_upstream||'');
+        const gpuHost=(e.why||'').trim()||upRaw.replace(/^https?:\/\//,'').replace(/:1143[45]$/,'');
+        if(e.kind==='request'&&e.duration_ms!=null){
+          toast('done',(e.model||e.path||'request')+' — done',
+            `${((e.duration_ms/1000).toFixed(1))}s · GPU: ${gpuHost||'?'} · status ${e.status||e.status_code||'200'}`,7000);
+          beep('done');
+        } else if(e.kind==='request'){
+          toast('',(e.model||e.path||'Inference request')+' — started',`GPU: ${gpuHost||'routing…'}`,5000);
+          beep('start');
+        } else if(e.kind==='error'){
+          toast('err',(e.model||e.path||'request')+' — failed',(e.why||e.message||''),7000);
+          beep('err');
+        }
+      }
+      if(typeof eid==='number') lastEventId=Math.max(lastEventId,eid);
       const kindChip = e.kind==='routing'?'<span class="chip c-warn">routing</span>':
                       e.kind==='error'?'<span class="chip c-hot">error</span>':
                       '<span class="chip c-ok">request</span>';
@@ -718,7 +774,7 @@ function renderModels(){
     const key=rowKey(h.url,m.name);
     const sr=m.success_rate, srColor=sr==null?'var(--muted)':(sr>=90?'var(--green)':sr>=70?'var(--warn,#e3b341)':'var(--red)');
     return `<tr data-row="${key}" data-host="${esc(h.url)}" data-model="${esc(m.name)}" data-machine="${esc(h.name)}">
-      <td><span class="hbadge">${esc(h.name)}</span></td>
+      <td><span class="hbadge">${esc(h.name)}</span>${h.mode==='push'?' <span class="hbadge" style="background:rgba(163,113,247,.18);color:#a371f7" title="push-mode: agent POSTs samples to hub">📡 PUSH</span>':''}</td>
       <td class="mname-cell">${esc(m.name)}</td>
       <td class="mmeta">${esc(m.params||'?')} · ${esc(m.quant||'?')} · ${m.size_gb}GB</td>
       <td class="num">${m.total_calls||0}</td>
