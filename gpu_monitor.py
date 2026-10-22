@@ -635,7 +635,7 @@ function toast(kind,title,sub,ttl){
 </div>
 <div id="tab-visualization" class="tabpane" style="display:none">
 <div class="card"><h2>Router Network — Machines & Active Models</h2>
-  <svg id="visgraph" style="border:1px solid var(--line);border-radius:10px;display:block;margin:0 auto;background:var(--bg);position:relative"></svg>
+  <div id="visgraph" style="border:1px solid var(--line);border-radius:10px;display:block;margin:0 auto;background:var(--bg);position:relative;overflow:hidden"></div>
   <p style="text-align:center;color:var(--mut);margin-top:.5rem;font-size:.85rem\">🔷 Router · 🔵 Machine · 🟢 Model (size = usage frequency)</p>
 </div>
 </div>
@@ -1080,7 +1080,7 @@ const HOST_COLORS=['#58a6ff','#a371f7','#f0883e','#3fb950','#f778ba','#d29922'];
 let visGraph=null, visSimulation=null;
 async function initVisualization(){
   const svg=document.getElementById('visgraph');
-  if(!svg||svg.tagName!=='svg') return;
+  if(!svg) return;
   try{
     const resp=await fetch('/gpu/models');
     const data=await resp.json();
@@ -1090,8 +1090,9 @@ async function initVisualization(){
 function drawVisualization(svg,data){
   if(!svg||!window.d3) return;
   const rect=svg.parentElement.getBoundingClientRect();
-  const W=Math.max(760,rect.width-36), H=W*0.72;
-  svg.setAttribute('width',W); svg.setAttribute('height',H);
+  const W=Math.max(760,rect.width-36), H=Math.round(W*0.72);
+  svg.style.width=W+'px'; svg.style.height=H+'px';
+  svg.setAttribute('aria-label','Router network visualization');
   svg.innerHTML='';
   
   const hosts=(data&&data.hosts)?data.hosts:[];

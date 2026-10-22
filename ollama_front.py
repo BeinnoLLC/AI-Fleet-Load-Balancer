@@ -577,11 +577,18 @@ def _build_app() -> FastAPI:
         return JSONResponse({"stats": events.stats(), "events": rows})
 
     async def _fetch_tags(url: str):
+        # A stalled Ollama daemon must not stall the dashboard tabs.  The shared
+        # client may have a generous request timeout for inference traffic, so
+        # enforce a short, endpoint-specific bound for this read-only probe.
+        import asyncio as _aio
         try:
-            r = await state["client"].get(f"{url}/api/tags")
+            r = await _aio.wait_for(
+                state["client"].get(f"{url}/api/tags"),
+                timeout=float(os.environ.get("GPU_MODELS_TIMEOUT_S", "4")),
+            )
             r.raise_for_status()
             return url, r.json().get("models", [])
-        except Exception as exc:
+        except Exception:
             return url, []
 
     @app.get("/gpu/models")
