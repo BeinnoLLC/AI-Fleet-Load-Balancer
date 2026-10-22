@@ -35,6 +35,7 @@ import ipaddress
 import json
 import os
 import socket
+import threading
 import time
 from typing import Optional
 
@@ -211,6 +212,11 @@ class FleetMonitor:
         self.stale_after = stale_after
         self.state: dict[str, dict] = {}  # name -> {url, gpus, ts, reachable, is_self}
         self._last_pick: Optional[str] = None  # routing stickiness (anti-flapping)
+        # In-flight request registry per host URL — the backbone of queue-aware
+        # routing. Each entry maps url -> list of monotonic start timestamps.
+        self.inflight: dict[str, list[float]] = {}
+        self._inflight_lock = threading.Lock()
+        self.max_req_seconds = float(os.environ.get("FLEET_MAX_REQ_SECONDS", "1800"))
         self._client = None
         self._task: Optional[asyncio.Task] = None
         self._local_ips = _local_ips()
@@ -229,7 +235,7 @@ class FleetMonitor:
             now_ms = time.time() * 1000.0
             self.history = {
                 k: s for k, s in (data or {}).items()
-                if isinstance(s, dict) and s.get("t") and now_ms - s["t"][-1] <= HISTORY_MS * 1000.0
+                if isinstance(s, dict) and s.get("t") and now_ms - s["t"][-1] <= HISTORY_MS
             }
         except Exception:
             self.history = {}
@@ -246,13 +252,13 @@ class FleetMonitor:
                 s = self.history.setdefault(k, {"t": [], "v": []})
                 s["t"].append(now_ms)
                 s["v"].append(round(g.get("memory_used_mb", 0) / 1024.0, 2))
-                while s["t"] and now_ms - s["t"][0] > HISTORY_MS * 1000.0:
+                while s["t"] and now_ms - s["t"][0] > HISTORY_MS:
                     s["t"].pop(0)
                     s["v"].pop(0)
         # prune series not seen in the window
         for k in list(self.history.keys()):
             s = self.history[k]
-            if not s["t"] or now_ms - s["t"][-1] > HISTORY_MS * 1000.0:
+            if not s["t"] or now_ms - s["t"][-1] > HISTORY_MS:
                 del self.history[k]
         # flush to disk at most every 30s so a service restart loses <30s
         if time.time() >= self._hist_flush_at:
@@ -358,28 +364,92 @@ class FleetMonitor:
             })
         return out
 
+    def url_to_name(self) -> dict[str, str]:
+        """Map host front URL -> friendly hostname for display."""
+        out = {}
+        for h in self.snapshot():
+            if h.get("url"):
+                out[h["url"]] = h["name"]
+        return out
+
+    # -------------------------- queue tracking --------------------------- #
+    def begin_request(self, url: str) -> None:
+        """Register that one proxied inference request just started on `url`."""
+        with self._inflight_lock:
+            self.inflight.setdefault(url, []).append(time.monotonic())
+
+    def end_request(self, url: str) -> None:
+        """Unregister a finished (or failed) request on `url`."""
+        with self._inflight_lock:
+            lst = self.inflight.get(url)
+            if lst:
+                lst.pop()  # requests finish ~FIFO per host
+
+    def _reap_inflight(self) -> None:
+        """Drop entries older than max_req_seconds so a vanished client can't
+        permanently skew routing (belts-and-braces; end_request is the normal path)."""
+        cutoff = time.monotonic() - self.max_req_seconds
+        with self._inflight_lock:
+            for url in list(self.inflight):
+                self.inflight[url] = [t for t in self.inflight[url] if t >= cutoff]
+                if not self.inflight[url]:
+                    del self.inflight[url]
+
+    def inflight_counts(self) -> dict[str, int]:
+        """url -> number of requests currently executing (or queued) on it."""
+        self._reap_inflight()
+        with self._inflight_lock:
+            return {u: len(v) for u, v in self.inflight.items() if v}
+
+    def queue_snapshot(self) -> list[dict]:
+        """Dashboard payload: recent in-flight requests that are still running
+        or waiting, oldest first."""
+        self._reap_inflight()
+        now = time.monotonic()
+        out = []
+        with self._inflight_lock:
+            for url, lst in self.inflight.items():
+                if not lst:
+                    continue
+                out.append({"url": url, "count": len(lst),
+                            "age_ms": round((now - min(lst)) * 1000, 1)})
+        return sorted(out, key=lambda q: q["count"], reverse=True)
+
     def pick_host(self) -> Optional[str]:
         """Return the front URL of the host that should take the next job.
+
+        Selection is queue-first: host with the FEWEST in-flight requests
+        wins; capacity is the tie-break within a tier, hysteresis kept inside
+        the zero-queue tier to stop flapping between idle hosts.
 
         Ranking is by `capacity` (from _score): a composite of GPU model
         power, free VRAM, current utilization headroom and thermals — so a
         3090 Ti idling at 38C beats a 4090 running at 95% and 80C, but a
         busy high-end card still beats an idle weak one when it has room.
-        Hysteresis: once a host wins, it keeps the job unless a challenger
-        beats its capacity by >= 15%, to stop load flapping between hosts.
         """
+        self._reap_inflight()
         candidates = [h for h in self.snapshot()
                       if h["online"] and h["score"] and h["score"]["gpu_count"] > 0
                       and h["score"]["capacity"] > 0]
         if not candidates:
             return None
-        ranked = sorted(candidates, key=lambda h: h["score"]["capacity"], reverse=True)
+        counts = self.inflight_counts()
+        # Tier 0: zero in-flight — rank by capacity with anti-flapping.
+        # Tier 1+: already busy — fewest-queue first, capacity tie-break.
+        zero = [h for h in candidates if counts.get(h["url"], 0) == 0]
+        pool = zero or candidates
+        if zero:
+            ranked = sorted(pool, key=lambda h: h["score"]["capacity"], reverse=True)
+        else:
+            ranked = sorted(pool, key=lambda h: (counts.get(h["url"], 0),
+                                                 -h["score"]["capacity"]))
         best = ranked[0]
-        holder = next((c for c in ranked if c["url"] == self._last_pick), None)
-        if holder is not None and holder is not best \
-                and best["score"]["capacity"] < holder["score"]["capacity"] * 1.15:
-            self._last_pick = holder["url"]
-            return holder["url"]
+        if zero:
+            holder = next((c for c in ranked if c["url"] == self._last_pick), None)
+            if holder is not None and holder is not best \
+                    and best["score"]["capacity"] < holder["score"]["capacity"] * 1.15:
+                self._last_pick = holder["url"]
+                return holder["url"]
         self._last_pick = best["url"]
         return best["url"]
 
@@ -539,6 +609,9 @@ function toast(kind,title,sub,ttl){
   <div class="card" style="grid-column:span 2"><h2>All GPUs — utilization history (10 min)</h2>
     <div class="chartbox" style="height:260px"><canvas id="allgpu"></canvas></div>
   </div>
+  <div class="card"><h2>Queue <span id="qtotal" class="chip c-ok">0</span></h2>
+    <table id="q"><thead><tr><th>Host</th><th>In-flight</th><th>Age</th><th>Upstream</th></tr></thead><tbody id="queuebody"></tbody></table>
+  </div>
   <div class="card" style="grid-column:1/-1"><h2>Per-GPU detail</h2>
     <table id="t"><thead><tr><th>Host</th><th>GPU</th><th>Utilization</th><th>VRAM</th><th>Temp</th><th>Last seen</th></tr></thead><tbody></tbody></table>
   </div>
@@ -643,6 +716,23 @@ function tick(){
   fetch('/gpu/fleet').then(r=>r.json()).then(d=>{
     document.getElementById('err').textContent='';
     if(!pie && window.Chart) mkPie();
+    // queue panel
+    const q=document.getElementById('queuebody');
+    if(q){
+      const qq=(d.queue||[]);
+      if(!qq.length){
+        q.innerHTML='<tr><td colspan="4" style="color:var(--mut)">queue empty — all GPUs idle</td></tr>';
+      } else {
+        q.innerHTML=qq.map(x=>{
+          const c=x.count, cls=c>=4?'c-hot':(c>=2?'c-warn':'c-ok');
+          return `<tr><td>${x.name||x.url}</td><td><span class="chip ${cls}">${c}</span></td>`+
+                 `<td>${(x.age_ms/1000).toFixed(1)}s</td><td>${x.url||''}</td></tr>`;
+        }).join('');
+      }
+      const tot=qq.reduce((s,x)=>s+x.count,0);
+      const qEl=document.getElementById('qtotal');
+      if(qEl){qEl.textContent=tot;qEl.className='chip '+(tot>=4?'c-hot':(tot>=1?'c-warn':'c-ok'));}
+    }
     // route banner
     const route=d.would_route_to||'(local fallback — routing off or no candidates)';
     const el=document.getElementById('route');

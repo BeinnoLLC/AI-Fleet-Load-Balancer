@@ -546,10 +546,15 @@ def _build_app() -> FastAPI:
                                 "online": True, "last_seen_s_ago": 0, "gpus": local_gpus,
                                 "score": None}],
                     "would_route_to": None}
+        names = gpu.url_to_name()
         return {
             "routing_enabled": True,
             "hosts": gpu.snapshot(),
             "would_route_to": gpu.pick_host(),
+            "queue": [
+                {**q, "name": names.get(q["url"], q["url"])}
+                for q in gpu.queue_snapshot()
+            ],
         }
 
     @app.get("/gpu/history")
@@ -709,6 +714,12 @@ def _build_app() -> FastAPI:
                           "/v1/completions", "/v1/embeddings", "/api/embed",
                           "/api/embeddings")
         target = _pick_upstream() if routed else UPSTREAM
+        gpu = state.get("gpu")
+        if routed and gpu is not None:
+            # Queue-aware accounting: tag this request against the exact URL
+            # it is sent to, so concurrent multi-model traffic spreads across
+            # hosts instead of all piling on the last capacity winner.
+            gpu.begin_request(target)
         url = f"{target}{path}"
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
         body = await request.body()
@@ -734,6 +745,20 @@ def _build_app() -> FastAPI:
             out = StreamingResponse(resp.aiter_raw(), status_code=resp.status_code,
                                     headers=fwd, media_type=resp.headers.get("content-type"))
             if routed:
+                # Release the queue slot when the streamed body has been fully
+                # consumed by the client, so long generations keep holding
+                # their GPU slot for their whole lifetime.
+                async def _iter_with_release(src):
+                    try:
+                        async for chunk in src:
+                            yield chunk
+                    finally:
+                        if gpu is not None:
+                            gpu.end_request(target)
+                out = StreamingResponse(_iter_with_release(resp.aiter_raw()),
+                                        status_code=resp.status_code,
+                                        headers=fwd,
+                                        media_type=resp.headers.get("content-type"))
                 events.log("request", path=path, model=model, stream=stream,
                            client=request.client.host if request.client else None,
                            chosen_upstream=target,
@@ -742,6 +767,8 @@ def _build_app() -> FastAPI:
             return out
         except Exception as exc:
             if routed:
+                if gpu is not None:
+                    gpu.end_request(target)
                 events.log("error", path=path, model=model, client=request.client.host if request.client else None,
                            chosen_upstream=target, why=f"proxy failure: {type(exc).__name__}: {exc}",
                            duration_ms=round((time.monotonic() - t0) * 1000, 1))
