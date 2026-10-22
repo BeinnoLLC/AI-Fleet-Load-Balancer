@@ -501,6 +501,8 @@ tr:last-child td{border-bottom:none}
 .qempty{padding:.6rem 0;color:var(--mut);font-size:.82rem}
 .qempty .zzz{display:inline-block;animation:zzzFloat 2.6s ease-in-out infinite}
 @keyframes zzzFloat{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(-3px);opacity:1}}
+.qsankey{width:100%;height:280px;background:linear-gradient(135deg,rgba(88,166,255,.03),rgba(139,92,246,.03));border:1px solid var(--line);border-radius:8px;margin-bottom:.8rem}
+.qsankey svg{display:block;width:100%;height:100%}
 .utilbar{width:100%;height:6px;background:#232b38;border-radius:3px;overflow:hidden;margin-top:3px}
 .utilbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--purple));transition:width .6s}
 .qcard h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);margin:0 0 .8rem;font-weight:600}
@@ -622,9 +624,9 @@ function toast(kind,title,sub,ttl){
   <div class="card" style="grid-column:span 2"><h2>All GPUs — utilization history (10 min)</h2>
     <div class="chartbox" style="height:260px"><canvas id="allgpu"></canvas></div>
   </div>
-  <div class="card qcard"><h2>Queue <span id="qtotal" class="chip c-ok">0</span></h2>
-    <div id="qvis" class="qvwrap"></div>
-    <table id="q" style="margin-top:.7rem"><thead><tr><th>Host</th><th>In-flight</th><th>Age</th><th>Upstream</th></tr></thead><tbody id="queuebody" style="display:none"></tbody></table>
+  <div class="card qcard"><h2>Queue — request flow to GPUs <span id="qtotal" class="chip c-ok">0</span></h2>
+    <div id="qvis" class="qsankey"><svg id="qsan"></svg></div>
+    <div id="qstats" style="font-size:.8rem;color:var(--mut);display:flex;gap:2rem;flex-wrap:wrap"></div>
   </div>
   <div class="card" style="grid-column:1/-1"><h2>Per-GPU detail</h2>
     <table id="t"><thead><tr><th>Host</th><th>GPU</th><th>Utilization</th><th>VRAM</th><th>Temp</th><th>Last seen</th></tr></thead><tbody></tbody></table>
@@ -727,23 +729,106 @@ function drawAllGpuChart(hosts){
   }
 }
 function drawQueueVis(qq){
-  const v=document.getElementById('qvis');
-  if(!v) return;
+  const svg=document.getElementById('qsan');
+  if(!svg) return;
   if(!qq.length){
-    v.innerHTML='<div class="qempty"><span class="zzz">💤</span> queue empty — all GPUs idle</div>';
-    v._prev=false;return;
+    svg.innerHTML='';
+    document.getElementById('qstats').innerHTML='<div style="color:var(--mut)">🟢 All GPUs idle — no requests in flight</div>';
+    return;
   }
-  const busy=!v._prev;
-  v._prev=true;
-  const MAX_DOTS=8;
-  v.innerHTML=qq.slice(0,6).map((x,i)=>{
-    const cnt=x.count, cls=cnt>=4?'c-hot':(cnt>=2?'c-warn':'c-ok');
-    const col=cls==='c-hot'?'#f87171':(cls==='c-warn'?'#fbbf24':'#38bdf8');
-    const dots=Array.from({length:Math.min(cnt,MAX_DOTS)},(_,k)=>
-      `<span class="qdot" style="left:${(-k*28)}px;animation-duration:${(2.4-0.18*k).toFixed(2)}s;animation-delay:${(-k*0.45).toFixed(2)}s;color:${col}"></span>`).join('');
-    return `<div class="qtrack"><span class="qname">${x.name||x.url}</span>`+
-      `<div class="qlane">${dots}</div><span class="chip ${cls} qpulse">${cnt}</span><span class="qcnt">${(x.age_ms/1000).toFixed(1)}s</span></div>`;
-  }).join('')+(qq.length>6?`<div class="qempty">… ${qq.length-6} more queued host(s)</div>`:'');
+  const W=svg.parentElement.offsetWidth-4, H=280;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.innerHTML='';
+  // Left: request sources (incoming), Right: GPU destinations
+  const PAD=40, COL_L=PAD, COL_R=W-PAD;
+  const colors=['#38bdf8','#a371f7','#4ade80','#f472b6','#fca5a5','#fbbf24','#2dd4bf','#818cf8'];
+  
+  // Group by upstream URL (request source)
+  const srcGroups={};
+  qq.forEach(q=>{
+    const src=q.url||'unknown';
+    if(!srcGroups[src]) srcGroups[src]={url:src,count:0,age:0};
+    srcGroups[src].count+=q.count;
+    srcGroups[src].age=Math.max(srcGroups[src].age,q.age_ms);
+  });
+  const srcs=Object.values(srcGroups);
+  
+  // Draw columns
+  const g=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','g');
+  
+  // Left column: request sources (batched by URL)
+  const srcH=Math.min(40, Math.max(20, (H-60)/srcs.length));
+  srcs.forEach((s,i)=>{
+    const y=40+i*srcH;
+    const tot=s.count;
+    const col=tot>=4?'#f87171':(tot>=2?'#fbbf24':'#38bdf8');
+    const r=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','rect');
+    r.setAttribute('x',COL_L-25);r.setAttribute('y',y-10);r.setAttribute('width',50);r.setAttribute('height',20);
+    r.setAttribute('rx',4);r.setAttribute('fill',col);r.setAttribute('opacity',.7);
+    g.appendChild(r);
+    const t=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',COL_L);t.setAttribute('y',y+3);t.setAttribute('text-anchor','middle');
+    t.setAttribute('font-size','11');t.setAttribute('fill','#fff');t.setAttribute('font-weight','700');
+    t.textContent=tot;g.appendChild(t);
+    const lbl=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','text');
+    lbl.setAttribute('x',COL_L+35);lbl.setAttribute('y',y+4);lbl.setAttribute('font-size','9');
+    lbl.setAttribute('fill','var(--fg)');lbl.textContent=s.url.split('/').pop()||'api';
+    g.appendChild(lbl);
+  });
+  
+  // Right column: GPU targets (per host from fleet data, stub)
+  const targets=[{name:'GPU0',load:0},{name:'GPU1',load:0}];
+  targets.forEach((t,i)=>{
+    const y=60+i*60;
+    const r=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','rect');
+    r.setAttribute('x',COL_R-20);r.setAttribute('y',y-12);r.setAttribute('width',40);r.setAttribute('height',24);
+    r.setAttribute('rx',4);r.setAttribute('fill','#4ade80');r.setAttribute('opacity',.6);
+    g.appendChild(r);
+    const txt=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','text');
+    txt.setAttribute('x',COL_R);txt.setAttribute('y',y+4);txt.setAttribute('text-anchor','middle');
+    txt.setAttribute('font-size','10');txt.setAttribute('fill','#fff');txt.setAttribute('font-weight','700');
+    txt.textContent=t.name;g.appendChild(txt);
+  });
+  
+  // Flow curves (Bezier from source to targets)
+  srcs.forEach((s,si)=>{
+    const sy=40+si*srcH;
+    const flowPerReq=s.count;
+    // Animate 1-3 flowing circles per source
+    const nFlow=Math.min(8,flowPerReq);
+    for(let fi=0;fi<nFlow;fi++){
+      const ty=60+Math.random()*120;
+      const path=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','path');
+      const cp1X=COL_L+80, cp1Y=sy;
+      const cp2X=COL_R-80, cp2Y=ty;
+      path.setAttribute('d',`M ${COL_L} ${sy} C ${cp1X} ${cp1Y} ${cp2X} ${cp2Y} ${COL_R} ${ty}`);
+      path.setAttribute('stroke','none');path.setAttribute('fill','none');
+      path.setAttribute('stroke-width',1);
+      g.appendChild(path);
+      
+      const circle=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','circle');
+      const col=flowPerReq>=4?'#f87171':(flowPerReq>=2?'#fbbf24':'#38bdf8');
+      circle.setAttribute('r',4);circle.setAttribute('fill',col);
+      circle.setAttribute('opacity',.8);
+      
+      const anim=svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg','animateMotion');
+      anim.setAttribute('dur',(2.5+Math.random()*.8).toFixed(2)+'s');anim.setAttribute('repeatCount','indefinite');
+      anim.setAttribute('path',`M ${COL_L} ${sy} C ${cp1X} ${cp1Y} ${cp2X} ${cp2Y} ${COL_R} ${ty}`);
+      circle.appendChild(anim);
+      g.appendChild(circle);
+    }
+  });
+  
+  svg.appendChild(g);
+  
+  // Stats row
+  const tot=srcs.reduce((a,s)=>a+s.count,0);
+  const maxAge=srcs.reduce((a,s)=>Math.max(a,s.age),0);
+  document.getElementById('qstats').innerHTML=`
+    <div><strong>Total in-flight:</strong> ${tot} request(s)</div>
+    <div><strong>Oldest request:</strong> ${(maxAge/1000).toFixed(1)}s ago</div>
+    <div><strong>Sources:</strong> ${srcs.length} upstream(s)</div>
+  `;
 }
 function tick(){
   fetch('/gpu/fleet').then(r=>r.json()).then(d=>{
