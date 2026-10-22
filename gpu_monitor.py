@@ -490,8 +490,21 @@ tr:last-child td{border-bottom:none}
 .c-ok{background:rgba(63,185,80,.15);color:var(--green)}
 .c-warn{background:rgba(210,153,34,.18);color:var(--amber)}
 .c-hot{background:rgba(248,81,73,.18);color:var(--red)}
+.qtrack{display:flex;gap:10px;align-items:center;padding:6px 0;position:relative;min-height:26px}
+.qtrack .qlane{position:relative;flex:1;height:22px;background:linear-gradient(90deg,transparent,var(--card) 20%,var(--card) 80%,transparent);border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);overflow:hidden;border-radius:6px}
+.qtrack .qdot{position:absolute;top:50%;width:10px;height:10px;margin-top:-5px;border-radius:50%;box-shadow:0 0 8px currentColor;background:currentColor;opacity:.9;animation:qflow 2.2s linear infinite}
+@keyframes qflow{0%{left:-14px;opacity:0}10%{opacity:.95}90%{opacity:.95}100%{left:100%;opacity:0}}
+.qtrack .qname{font-weight:700;font-size:.9rem;min-width:110px}
+.qtrack .qcnt{font-size:.75rem;color:var(--mut)}
+.qpulse{animation:qpulse 1.2s ease-in-out infinite}
+@keyframes qpulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+.qempty{padding:.6rem 0;color:var(--mut);font-size:.82rem}
+.qempty .zzz{display:inline-block;animation:zzzFloat 2.6s ease-in-out infinite}
+@keyframes zzzFloat{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(-3px);opacity:1}}
 .utilbar{width:100%;height:6px;background:#232b38;border-radius:3px;overflow:hidden;margin-top:3px}
 .utilbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--purple));transition:width .6s}
+.qcard h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);margin:0 0 .8rem;font-weight:600}
+.qvwrap{min-height:40px}
 .foot{color:var(--mut);font-size:.72rem;margin-top:1.3rem}
 .route-banner{max-width:1200px;margin:0 auto;background:linear-gradient(90deg,rgba(63,185,80,.08),rgba(88,166,255,.06));
 border:1px solid var(--line);border-radius:12px;padding:.7rem 1.1rem;margin-bottom:1.1rem;
@@ -609,8 +622,9 @@ function toast(kind,title,sub,ttl){
   <div class="card" style="grid-column:span 2"><h2>All GPUs — utilization history (10 min)</h2>
     <div class="chartbox" style="height:260px"><canvas id="allgpu"></canvas></div>
   </div>
-  <div class="card"><h2>Queue <span id="qtotal" class="chip c-ok">0</span></h2>
-    <table id="q"><thead><tr><th>Host</th><th>In-flight</th><th>Age</th><th>Upstream</th></tr></thead><tbody id="queuebody"></tbody></table>
+  <div class="card qcard"><h2>Queue <span id="qtotal" class="chip c-ok">0</span></h2>
+    <div id="qvis" class="qvwrap"></div>
+    <table id="q" style="margin-top:.7rem"><thead><tr><th>Host</th><th>In-flight</th><th>Age</th><th>Upstream</th></tr></thead><tbody id="queuebody" style="display:none"></tbody></table>
   </div>
   <div class="card" style="grid-column:1/-1"><h2>Per-GPU detail</h2>
     <table id="t"><thead><tr><th>Host</th><th>GPU</th><th>Utilization</th><th>VRAM</th><th>Temp</th><th>Last seen</th></tr></thead><tbody></tbody></table>
@@ -712,6 +726,25 @@ function drawAllGpuChart(hosts){
     allGpuChart.update('none');
   }
 }
+function drawQueueVis(qq){
+  const v=document.getElementById('qvis');
+  if(!v) return;
+  if(!qq.length){
+    v.innerHTML='<div class="qempty"><span class="zzz">💤</span> queue empty — all GPUs idle</div>';
+    v._prev=false;return;
+  }
+  const busy=!v._prev;
+  v._prev=true;
+  const MAX_DOTS=8;
+  v.innerHTML=qq.slice(0,6).map((x,i)=>{
+    const cnt=x.count, cls=cnt>=4?'c-hot':(cnt>=2?'c-warn':'c-ok');
+    const col=cls==='c-hot'?'#f87171':(cls==='c-warn'?'#fbbf24':'#38bdf8');
+    const dots=Array.from({length:Math.min(cnt,MAX_DOTS)},(_,k)=>
+      `<span class="qdot" style="left:${(-k*28)}px;animation-duration:${(2.4-0.18*k).toFixed(2)}s;animation-delay:${(-k*0.45).toFixed(2)}s;color:${col}"></span>`).join('');
+    return `<div class="qtrack"><span class="qname">${x.name||x.url}</span>`+
+      `<div class="qlane">${dots}</div><span class="chip ${cls} qpulse">${cnt}</span><span class="qcnt">${(x.age_ms/1000).toFixed(1)}s</span></div>`;
+  }).join('')+(qq.length>6?`<div class="qempty">… ${qq.length-6} more queued host(s)</div>`:'');
+}
 function tick(){
   fetch('/gpu/fleet').then(r=>r.json()).then(d=>{
     document.getElementById('err').textContent='';
@@ -720,6 +753,7 @@ function tick(){
     const q=document.getElementById('queuebody');
     if(q){
       const qq=(d.queue||[]);
+      drawQueueVis(qq);
       if(!qq.length){
         q.innerHTML='<tr><td colspan="4" style="color:var(--mut)">queue empty — all GPUs idle</td></tr>';
       } else {
