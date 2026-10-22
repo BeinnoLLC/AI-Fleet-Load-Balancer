@@ -28,7 +28,8 @@ import time
 import asyncio
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, FileResponse, Response
+from pathlib import Path
 
 from gpu_monitor import FleetMonitor, read_local_gpus, DASHBOARD_HTML
 
@@ -483,6 +484,13 @@ def _build_app() -> FastAPI:
             "usage": {"input_tokens": sum(u["input"] for _, _, u in results),
                       "output_tokens": sum(u["output"] for _, _, u in results)},
         }
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon():
+        path = Path(__file__).resolve().parent / "favicon.svg"
+        if path.exists():
+            return FileResponse(path, media_type="image/svg+xml")
+        return Response(status_code=404)
 
     @app.get("/health")
     async def health():
